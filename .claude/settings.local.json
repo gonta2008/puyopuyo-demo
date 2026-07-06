@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($paths = @\\(\"C:\\\\Program Files\\\\Aseprite\\\\aseprite.exe\", \"C:\\\\Program Files \\(x86\\)\\\\Aseprite\\\\aseprite.exe\", \"C:\\\\Program Files \\(x86\\)\\\\Steam\\\\steamapps\\\\common\\\\Aseprite\\\\aseprite.exe\", \"C:\\\\Program Files\\\\Steam\\\\steamapps\\\\common\\\\Aseprite\\\\aseprite.exe\"\\); foreach \\($p in $paths\\) { if \\(Test-Path $p\\) { Write-Output \"FOUND: $p\" } }; $cmd = Get-Command aseprite -ErrorAction SilentlyContinue; if \\($cmd\\) { Write-Output \"PATH: $\\($cmd.Source\\)\" } else { Write-Output \"aseprite not in PATH\" })",
+      "PowerShell(& \"C:\\\\Program Files \\(x86\\)\\\\Steam\\\\steamapps\\\\common\\\\Aseprite\\\\aseprite.exe\" -b \"C:\\\\AI learning\\\\game\\\\puyopuyo\\\\puyopuyo.aseprite\" --list-layers --list-tags --list-slices)",
+      "PowerShell(New-Item -ItemType Directory -Force \"C:\\\\AI learning\\\\game\\\\puyopuyo\\\\assets\" | Out-Null; & \"C:\\\\Program Files \\(x86\\)\\\\Steam\\\\steamapps\\\\common\\\\Aseprite\\\\aseprite.exe\" -b \"C:\\\\AI learning\\\\game\\\\puyopuyo\\\\puyopuyo.aseprite\" --sheet \"C:\\\\AI learning\\\\game\\\\puyopuyo\\\\assets\\\\puyopuyo.png\" --data \"C:\\\\AI learning\\\\game\\\\puyopuyo\\\\assets\\\\puyopuyo.json\" --sheet-type rows --split-layers --list-layers --list-tags; Write-Output \"exit=$LASTEXITCODE\"; Get-ChildItem \"C:\\\\AI learning\\\\game\\\\puyopuyo\\\\assets\")"
+    ]
+  }
+}
