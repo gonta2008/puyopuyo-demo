@@ -1,0 +1,1429 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>ぷよぷよ - Aseprite Edition</title>
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    background: radial-gradient(circle at 50% 20%, #2a2d4a 0%, #16172a 70%);
+    color: #dfe3ff;
+    font-family: "Segoe UI", "Hiragino Sans", "Meiryo", sans-serif;
+    min-height: 100vh;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+  }
+  h1 {
+    font-size: 20px; letter-spacing: 2px; margin: 12px 0 8px;
+    text-shadow: 0 2px 8px rgba(0,0,0,.6);
+  }
+  canvas {
+    image-rendering: pixelated;
+    border-radius: 8px;
+    box-shadow: 0 8px 32px rgba(0,0,0,.55);
+    background: #101120;
+  }
+  .help {
+    margin: 10px 0 16px; font-size: 12px; opacity: .75; line-height: 1.7;
+    text-align: center;
+  }
+  kbd {
+    background: #2c2f52; border: 1px solid #494d7e; border-bottom-width: 2px;
+    border-radius: 4px; padding: 1px 6px; font-size: 11px;
+  }
+  /* オンライン対戦の接続UI */
+  #netui {
+    position: absolute; inset: 0;
+    align-items: center; justify-content: center;
+    background: rgba(8,8,20,.75); border-radius: 8px;
+  }
+  #netui .panel {
+    background: #1c1e38; border: 1px solid #494d7e; border-radius: 10px;
+    padding: 20px 28px; text-align: center; min-width: 220px;
+  }
+  #netui h2 { margin: 0 0 14px; font-size: 16px; }
+  #netui p { margin: 6px 0; font-size: 13px; }
+  #netui button {
+    display: block; width: 100%; margin: 8px 0; padding: 8px; font-size: 14px;
+    background: #2c2f52; color: #dfe3ff; border: 1px solid #494d7e;
+    border-radius: 6px; cursor: pointer; font-family: inherit;
+  }
+  #netui button:hover { background: #3a3e6e; }
+  #netui input {
+    width: 100%; box-sizing: border-box; padding: 8px; font-size: 16px;
+    text-align: center; background: #101124; color: #fff;
+    border: 1px solid #494d7e; border-radius: 6px; margin: 8px 0;
+  }
+  #netui .code {
+    font-size: 24px; font-weight: bold; letter-spacing: 2px; color: #ffd76a;
+    background: #101124; border-radius: 6px; padding: 10px; margin: 10px 0;
+    user-select: all;
+  }
+  #netui .small { font-size: 11px; opacity: .7; }
+  #netStatus, #joinStatus { font-size: 11px; color: #ff9b9b; min-height: 14px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<h1>ぷよぷよ <span style="font-size:12px;opacity:.6">Aseprite Edition</span></h1>
+<div id="wrap" style="position:relative">
+<canvas id="cv" width="528" height="624"></canvas>
+<div id="netui" style="display:none">
+  <div class="panel">
+    <div id="net-menu">
+      <h2>オンライン対戦</h2>
+      <button id="btnHost">部屋を作る</button>
+      <button id="btnJoin">部屋に入る</button>
+      <button id="btnBack">もどる</button>
+      <div id="netStatus"></div>
+    </div>
+    <div id="net-host" style="display:none">
+      <p>この合言葉を相手に伝えてね</p>
+      <div id="roomCode" class="code"></div>
+      <p class="small">相手が入ってくるのを待っています...</p>
+      <button id="btnCancelHost">やめる</button>
+    </div>
+    <div id="net-join" style="display:none">
+      <p>合言葉を入力してね</p>
+      <input id="joinCode" maxlength="12" placeholder="puyo-xxxx" autocomplete="off">
+      <button id="btnConnect">つなぐ</button>
+      <button id="btnCancelJoin">もどる</button>
+      <div id="joinStatus"></div>
+    </div>
+  </div>
+</div>
+</div>
+<script src="assets/puyos.js"></script>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<div class="help">
+  <kbd>←</kbd><kbd>→</kbd> 移動　<kbd>Z</kbd> 左回転　<kbd>X</kbd>/<kbd>↑</kbd> 右回転　<kbd>↓</kbd> 高速落下　<kbd>Space</kbd> 一気に落とす<br>
+  <kbd>P</kbd> ポーズ　<kbd>M</kbd> サウンド　<kbd>R</kbd> リスタート / 再戦　<kbd>Q</kbd> タイトルへ<br>
+  タイトルで: <kbd>S</kbd> おじゃまサバイバル　<kbd>C</kbd> COM対戦　<kbd>V</kbd> オンライン対戦
+</div>
+<script>
+"use strict";
+// ================= 定数 =================
+const COLS = 6, ROWS = 13;      // row 0 は隠し行
+const CELL = 16, SCALE = 3;
+const BOARD_X = 8, BOARD_Y = 8; // 論理座標での盤面の左上（可視部分）
+const H = 208;
+const W_SOLO = 176, W_VS = 232; // 対戦中は相手の盤面ぶんキャンバスを広げる
+let W = W_SOLO;
+
+// おじゃまぷよ
+const GARBAGE = -2;             // 盤面上でのおじゃまぷよの値 (-1 は空)
+const GARBAGE_RATE = 70;        // スコア何点でおじゃま1個ぶんか (ぷよ通準拠)
+const MAX_GARBAGE_DROP = 30;    // 一度に降る最大数 (5段ぶん)
+
+// ===== スプライト定義 =====
+// puyopuyo.aseprite の各レイヤーが1色ぶん (フレーム0=通常, 1=まばたき/着地, 2=消滅演出)
+// 座標は assets/puyos.js (export.bat が生成) → assets/puyos.json → 内蔵フォールバック の順に読む。
+// .aseprite を編集したら export.bat を実行するだけで反映される。
+let SHEET = {
+  red:    [[0,0],[16,0],[32,0]],
+  blue:   [[48,0],[0,16],[16,16]],
+  green:  [[32,16],[48,16],[0,32]],
+  orange: [[16,32],[32,32],[48,32]],
+  white:  [[0,48],[16,48],[32,48]],
+};
+let COLOR_NAMES = ["red", "blue", "green", "orange", "white"];
+const COLOR_COUNT = 4;              // ゲームで使う色数 (レイヤーを増やせばその数まで上げられる)
+
+function applySheetData(data) {
+  if (!data || !data.frames) return;
+  const fix = (n) => n === "while" ? "white" : n;  // レイヤー名の揺れを吸収
+  const sheet = {};
+  for (const key of Object.keys(data.frames)) {
+    const m = key.match(/^(.+)_(\d+)/);            // 例: "red_0"
+    if (!m) continue;
+    const name = fix(m[1]);
+    const f = data.frames[key].frame;
+    (sheet[name] = sheet[name] || [])[+m[2]] = [f.x, f.y];
+  }
+  if (!Object.keys(sheet).length) return;
+  SHEET = sheet;
+  if (data.meta && Array.isArray(data.meta.layers)) {
+    const names = data.meta.layers.map(l => fix(l.name)).filter(n => sheet[n]);
+    if (names.length) COLOR_NAMES = names;
+  } else {
+    COLOR_NAMES = Object.keys(sheet);
+  }
+}
+if (window.PUYO_SHEET_DATA) {
+  applySheetData(window.PUYO_SHEET_DATA);
+} else {
+  fetch("assets/puyos.json").then(r => r.json()).then(applySheetData).catch(() => {});
+}
+
+// 回転方向: 0=上 1=右 2=下 3=左 (子ぷよの位置)
+const ROTV = [[0,-1],[1,0],[0,1],[-1,0]];
+
+// 連鎖倍率 (ぷよぷよ通準拠)
+const CHAIN_POWER = [0,8,16,32,64,96,128,160,192,224,256,288,320,352,384,416,448,480,512];
+const COLOR_BONUS = [0,3,6,12,24];
+const GROUP_BONUS = [0,2,3,4,5,6,7];
+
+// ================= 状態 =================
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+ctx.imageSmoothingEnabled = false;
+
+const img = new Image();
+img.src = "assets/puyos.png";
+let imgReady = false;
+img.onload = () => { imgReady = true; };
+
+let state = "title";   // title | play | drop | pop | over | pause
+let prevState = "play";
+let grid, pair, queue, score, chain, maxChain, level, pairsPlaced;
+let dropAnims = [], popCells = [], popTimer = 0, popInfo = null;
+let lockTimer = 0, lockResets = 0, grounded = false;
+let chainPopup = null;   // {text, t}
+let lastLocked = [];     // 着地スクワッシュ演出 [{x,y,t}]
+let allClearPending = false;
+let softDropAccum = 0;
+let time = 0;
+
+// ===== オンライン対戦の状態 =====
+let mode = "solo";              // solo | vs
+let pendingIncoming = 0;        // 自分に降る予定のおじゃまぷよ数 (予告)
+let nuisanceCarry = 0;          // おじゃま換算の端数持ち越し
+let garbageDropped = false;     // このターンにおじゃまを降らせたか
+let opp = null;                 // 相手の盤面ミラー {grid, pair, score, chain, pending}
+let vsResult = null;            // win | lose | disconnect
+let myRematch = false, oppRematch = false;
+let countdownT = 0;
+let pairSendTimer = 0;
+let survivalT = 14000;          // サバイバル: 次のおじゃままでの残り時間
+
+// 対戦時は同じシードで同じツモ順にするための乱数
+// (おじゃまの落下位置には使わないこと! 消費タイミングが人によって違うとツモ順がズレる)
+let rng = Math.random;
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function newPair() {
+  const n = Math.max(1, Math.min(COLOR_COUNT, COLOR_NAMES.length));
+  return [Math.floor(rng()*n), Math.floor(rng()*n)];
+}
+
+function initBoard() {
+  grid = Array.from({length: ROWS}, () => Array(COLS).fill(-1));
+  queue = [newPair(), newPair()];
+  pair = null;
+  score = 0; chain = 0; maxChain = 0; level = 1; pairsPlaced = 0;
+  dropAnims = []; popCells = []; chainPopup = null; lastLocked = [];
+  allClearPending = false;
+  pendingIncoming = 0; nuisanceCarry = 0; garbageDropped = false;
+  vsResult = null; myRematch = false; oppRematch = false;
+  survivalT = 14000;
+}
+initBoard(); // タイトル画面でも盤面を描画するため、起動時に初期化しておく
+
+function reset() {
+  initBoard();
+  spawn();
+  state = "play";
+}
+
+function spawn() {
+  const colors = queue.shift();
+  queue.push(newPair());
+  pair = { x: 2, y: 1, rot: 0, colors };
+  grounded = false; lockTimer = 0; lockResets = 0;
+  garbageDropped = false;
+  if (!canPlace(pair.x, pair.y, pair.rot)) {
+    if (mode === "vs") vsLose(); else state = "over";
+    sndGameOver();
+    return;
+  }
+  netSendBoard();
+  netSendPair();
+}
+
+// g を省略すると自分の盤面。COM は自分専用の盤面を渡して使う
+function canPlace(x, yi, rot, g = grid) {
+  const cells = [[x, yi], [x + ROTV[rot][0], yi + ROTV[rot][1]]];
+  for (const [cx, cy] of cells) {
+    if (cx < 0 || cx >= COLS) return false;
+    if (cy >= ROWS) return false;
+    if (cy >= 0 && g[cy][cx] !== -1) return false;
+  }
+  return true;
+}
+
+// 落下可能な最下段 (整数行) を求める
+function restRow(x, y, rot, g = grid) {
+  let r = Math.floor(y + 1e-9);
+  while (canPlace(x, r + 1, rot, g)) r++;
+  return r;
+}
+
+// ================= 操作 =================
+function tryMove(dx) {
+  const fy = Math.floor(pair.y + 1e-9), cy = Math.ceil(pair.y - 1e-9);
+  if (canPlace(pair.x + dx, fy, pair.rot) && canPlace(pair.x + dx, cy, pair.rot)) {
+    pair.x += dx;
+    if (grounded && lockResets < 8) { lockTimer = 0; lockResets++; }
+    sndMove();
+    return true;
+  }
+  return false;
+}
+
+function tryRotate(dir) {
+  const rots = [(pair.rot + dir + 4) % 4, (pair.rot + 2) % 4]; // 通常回転 → だめならクイックターン
+  for (const nr of rots) {
+    const [vx, vy] = ROTV[nr];
+    const offsets = [[0,0]];
+    if (vx !== 0) offsets.push([-vx, 0]);          // 壁蹴り
+    if (vy > 0) offsets.push([0, -1]);             // 床蹴り (持ち上げ)
+    for (const [ox, oy] of offsets) {
+      const nx = pair.x + ox;
+      const ny = pair.y + oy;
+      const fy = Math.floor(ny + 1e-9), cy2 = Math.ceil(ny - 1e-9);
+      if (ny >= 0 && canPlace(nx, fy, nr) && canPlace(nx, cy2, nr)) {
+        pair.x = nx; pair.y = ny; pair.rot = nr;
+        if (grounded && lockResets < 8) { lockTimer = 0; lockResets++; }
+        grounded = false;
+        sndRotate();
+        return;
+      }
+    }
+  }
+}
+
+function hardDrop() {
+  const r = restRow(pair.x, pair.y, pair.rot);
+  score += Math.max(0, Math.floor(r - pair.y)) * 2;
+  pair.y = r;
+  lockPair();
+}
+
+function lockPair() {
+  const yi = Math.round(pair.y);
+  const [vx, vy] = ROTV[pair.rot];
+  const cells = [
+    { x: pair.x, y: yi, c: pair.colors[0] },
+    { x: pair.x + vx, y: yi + vy, c: pair.colors[1] },
+  ];
+  for (const c of cells) {
+    if (c.y >= 0) { grid[c.y][c.x] = c.c; lastLocked.push({ x: c.x, y: c.y, t: time }); }
+  }
+  pairsPlaced++;
+  if (pairsPlaced % 20 === 0) { level++; sndLevelUp(); }
+  allClearPending = true;   // このターンで全消ししたらボーナス対象
+  chain = 0;
+  netSendBoard();
+  sndLand();
+  startDrop();
+}
+
+// ================= 落下 → 連鎖 =================
+function startDrop() {
+  dropAnims = [];
+  for (let c = 0; c < COLS; c++) {
+    let write = ROWS - 1;
+    for (let r = ROWS - 1; r >= 0; r--) {
+      if (grid[r][c] !== -1) {
+        if (write !== r) {
+          dropAnims.push({ col: c, color: grid[r][c], y: r, toY: write, v: 0 });
+          grid[r][c] = -1;
+        }
+        write--;
+      }
+    }
+  }
+  state = "drop";
+  if (dropAnims.length === 0) checkChains();
+}
+
+// ===== 盤面処理の共有ヘルパー (自分の盤面にも COM の先読みにも使う純粋関数) =====
+// 4つ以上つながった同色グループを探す (隠し行は含めない)
+function findGroupsIn(g) {
+  const seen = Array.from({length: ROWS}, () => Array(COLS).fill(false));
+  const groups = [];
+  for (let r = 1; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (g[r][c] < 0 || seen[r][c]) continue;  // 空きとおじゃまは起点にしない
+      const color = g[r][c], stack = [[r, c]], group = [];
+      seen[r][c] = true;
+      while (stack.length) {
+        const [cr, cc] = stack.pop();
+        group.push([cr, cc]);
+        for (const [dr, dc] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+          const nr = cr + dr, nc = cc + dc;
+          if (nr < 1 || nr >= ROWS || nc < 0 || nc >= COLS) continue;
+          if (!seen[nr][nc] && g[nr][nc] === color) { seen[nr][nc] = true; stack.push([nr, nc]); }
+        }
+      }
+      if (group.length >= 4) groups.push({ color, cells: group });
+    }
+  }
+  return groups;
+}
+
+// 消えるグループに隣接したおじゃまぷよの位置 [r, c] を列挙
+function garbageNeighbors(g, groups) {
+  const gset = new Set();
+  for (const gr of groups) for (const [r, c] of gr.cells) {
+    for (const [dr, dc] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+      const nr = r + dr, nc = c + dc;
+      if (nr >= 1 && nr < ROWS && nc >= 0 && nc < COLS && g[nr][nc] === GARBAGE) gset.add(nr * COLS + nc);
+    }
+  }
+  return [...gset].map(k => [Math.floor(k / COLS), k % COLS]);
+}
+
+// 連鎖 chainNo 段目のスコア計算 (ぷよ通準拠)
+function chainStepScore(groups, chainNo) {
+  const cleared = groups.reduce((s, g) => s + g.cells.length, 0);
+  const colors = new Set(groups.map(g => g.color)).size;
+  const groupBonus = groups.reduce((s, g) => s + (g.cells.length >= 11 ? 10 : GROUP_BONUS[g.cells.length - 4]), 0);
+  const power = CHAIN_POWER[Math.min(chainNo - 1, CHAIN_POWER.length - 1)];
+  const mult = Math.min(999, Math.max(1, power + COLOR_BONUS[colors - 1] + groupBonus));
+  return { cleared, mult, score: 10 * cleared * mult };
+}
+
+// 浮いているぷよを一気に下へ詰める (アニメーションなし版)
+function compactGrid(g) {
+  for (let c = 0; c < COLS; c++) {
+    let write = ROWS - 1;
+    for (let r = ROWS - 1; r >= 0; r--) {
+      if (g[r][c] !== -1) {
+        if (write !== r) { g[write][c] = g[r][c]; g[r][c] = -1; }
+        write--;
+      }
+    }
+  }
+}
+
+// 盤面のコピーで連鎖を最後まで解決してみる (COM の先読み用)
+function simulate(g0) {
+  const g = g0.map(row => row.slice());
+  let chainNo = 0, total = 0;
+  for (;;) {
+    compactGrid(g);
+    const groups = findGroupsIn(g);
+    if (!groups.length) break;
+    chainNo++;
+    total += chainStepScore(groups, chainNo).score;
+    const gn = garbageNeighbors(g, groups);
+    for (const gr of groups) for (const [r, c] of gr.cells) g[r][c] = -1;
+    for (const [r, c] of gn) g[r][c] = -1;
+  }
+  return { chain: chainNo, score: total, grid: g };
+}
+
+function checkChains() {
+  const groups = findGroupsIn(grid);
+
+  if (groups.length > 0) {
+    chain++;
+    maxChain = Math.max(maxChain, chain);
+    const st = chainStepScore(groups, chain);
+    score += st.score;
+
+    popCells = groups.flatMap(g => g.cells.map(([r, c]) => ({ r, c, color: g.color })));
+    // 消えるグループに隣接したおじゃまぷよも巻き込んで消す (スコアには入らない)
+    for (const [r, c] of garbageNeighbors(grid, groups)) popCells.push({ r, c, color: GARBAGE });
+
+    // 対戦/サバイバル: スコアをおじゃまに換算。自分への予告ぶんから相殺し、対戦なら残りを相手に送る
+    if (mode === "vs" || mode === "survival") {
+      nuisanceCarry += st.score / GARBAGE_RATE;
+      let out = Math.floor(nuisanceCarry);
+      nuisanceCarry -= out;
+      if (out > 0 && pendingIncoming > 0) {
+        const cancel = Math.min(pendingIncoming, out);
+        pendingIncoming -= cancel; out -= cancel;
+      }
+      if (out > 0 && mode === "vs") netSend({ t: "garbage", n: out });
+    }
+
+    popTimer = 0;
+    chainPopup = { text: chain + "れんさ!", t: 0 };
+    state = "pop";
+    sndPop(chain);
+  } else {
+    // 全消しボーナス
+    let empty = true;
+    for (let r = 1; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (grid[r][c] !== -1) empty = false;
+    if (empty && pairsPlaced > 0 && allClearPending) {
+      allClearPending = false;
+      if (mode === "vs") {
+        netSend({ t: "garbage", n: 30 });   // 全消しはおじゃま30個ぶんの攻撃
+        chainPopup = { text: "ぜんけし!", t: 0 };
+      } else {
+        score += 3600;
+        chainPopup = { text: "ぜんけし! +3600", t: 0 };
+      }
+      sndAllClear();
+    }
+    // 自分への予告おじゃまを降らせてから次のツモへ
+    if ((mode === "vs" || mode === "survival") && pendingIncoming > 0 && !garbageDropped) {
+      garbageDropped = true;
+      dropGarbage();
+      return;
+    }
+    spawn();
+    if (state !== "over" && state !== "vsend") state = "play";
+  }
+}
+
+// 予告おじゃまを盤面に降らせる (上から落下アニメーション)
+function dropGarbage() {
+  let n = Math.min(pendingIncoming, MAX_GARBAGE_DROP);
+  pendingIncoming -= n;
+  // 各列のいちばん上の埋まっている行を調べる
+  const top = [];
+  for (let c = 0; c < COLS; c++) {
+    let t = ROWS;
+    for (let r = 0; r < ROWS; r++) if (grid[r][c] !== -1) { t = r; break; }
+    top[c] = t;
+  }
+  dropAnims = [];
+  let layer = 0;
+  while (n > 0 && layer <= 10) {
+    // 1段ぶんの列をランダムに選ぶ (Math.random を使う: 共有シードを消費しないため)
+    const cols = [0, 1, 2, 3, 4, 5].sort(() => Math.random() - 0.5).slice(0, Math.min(6, n));
+    for (const c of cols) {
+      const toY = top[c] - 1;
+      n--;
+      if (toY < 0) continue;   // 盤面からあふれたぶんは消える
+      top[c] = toY;
+      dropAnims.push({ col: c, color: GARBAGE, y: -1 - layer * 1.2 - Math.random() * 0.5, toY, v: 0 });
+    }
+    layer++;
+  }
+  state = "drop";
+  if (!dropAnims.length) { spawn(); if (state !== "over" && state !== "vsend") state = "play"; }
+}
+
+// ================= オンライン対戦 (PeerJS / WebRTC) =================
+let peer = null, conn = null, isHost = false;
+let com = null;   // COM対戦のとき: 相手を演じるAI (通信の代わりにここへメッセージが届く)
+const $ = (id) => document.getElementById(id);
+
+function netSend(msg) {
+  if (com) { com.receive(msg); return; }
+  if (conn && conn.open) { try { conn.send(msg); } catch (e) {} }
+}
+
+function encodeGridOf(g) {
+  let s = "";
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const v = g[r][c];
+    s += v === -1 ? "." : v === GARBAGE ? "G" : String(v);
+  }
+  return s;
+}
+function encodeGrid() { return encodeGridOf(grid); }
+function decodeGrid(s) {
+  const g = Array.from({ length: ROWS }, () => Array(COLS).fill(-1));
+  if (typeof s !== "string" || s.length < ROWS * COLS) return g;
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const ch = s[r * COLS + c];
+    g[r][c] = ch === "." ? -1 : ch === "G" ? GARBAGE : +ch;
+  }
+  return g;
+}
+
+function netSendBoard() {
+  if (mode !== "vs") return;
+  netSend({ t: "board", g: encodeGrid(), s: score, c: chain, p: pendingIncoming });
+}
+function netSendPair() {
+  if (mode !== "vs" || state !== "play" || !pair) return;
+  netSend({ t: "pair", x: pair.x, y: Math.round(pair.y * 10) / 10, r: pair.rot, cs: pair.colors });
+}
+
+function handleNet(msg) {
+  if (!msg || typeof msg !== "object") return;
+  switch (msg.t) {
+    case "start":       // ホストからの開始合図 (ツモ順のシード共有)
+      startVsMatch(msg.seed >>> 0);
+      break;
+    case "board":
+      opp = opp || {};
+      opp.grid = decodeGrid(msg.g);
+      opp.score = msg.s; opp.chain = msg.c; opp.pending = msg.p;
+      opp.pair = null;  // 盤面確定時点で操作ぷよ表示はいったん消す
+      break;
+    case "pair":
+      opp = opp || {};
+      opp.pair = { x: msg.x, y: msg.y, rot: msg.r, colors: msg.cs };
+      break;
+    case "garbage":
+      if (typeof msg.n === "number" && msg.n > 0) pendingIncoming += Math.min(999, Math.floor(msg.n));
+      break;
+    case "lose":        // 相手が倒れた → 自分の勝ち
+      if (state !== "vsend") { vsResult = "win"; state = "vsend"; sndAllClear(); }
+      break;
+    case "rematch":
+      oppRematch = true;
+      maybeRematch();
+      break;
+  }
+}
+
+function maybeRematch() {
+  if (myRematch && oppRematch && isHost) {
+    const seed = (Math.random() * 0xffffffff) >>> 0;
+    netSend({ t: "start", seed });
+    startVsMatch(seed);
+  }
+}
+
+function startVsMatch(seed) {
+  mode = "vs";
+  setCanvasWidth(W_VS);
+  rng = mulberry32(seed);
+  initBoard();
+  opp = { grid: Array.from({ length: ROWS }, () => Array(COLS).fill(-1)), score: 0, pair: null, pending: 0 };
+  hideNetUI();
+  countdownT = 3000;
+  pairSendTimer = 0;
+  state = "count";
+}
+
+function vsLose() {
+  vsResult = "lose";
+  state = "vsend";
+  netSend({ t: "lose" });
+  netSendBoard();
+}
+
+function exitVs() {
+  cleanupPeer();
+  mode = "solo";
+  opp = null;
+  rng = Math.random;
+  setCanvasWidth(W_SOLO);
+  initBoard();
+  state = "title";
+}
+
+function cleanupPeer() {
+  if (conn) { try { conn.close(); } catch (e) {} conn = null; }
+  if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
+  com = null;
+}
+
+// ================= COM対戦 =================
+// COMは自分専用の盤面で本物のゲームを進め、オンライン対戦と同じメッセージで応答する
+class ComPlayer {
+  constructor(seed) {
+    this.rng = mulberry32(seed);   // ツモ生成専用 (プレイヤーと同じ順になる)
+    this.grid = Array.from({ length: ROWS }, () => Array(COLS).fill(-1));
+    this.queue = [this.newPair(), this.newPair()];
+    this.pending = 0;              // COMに降る予定のおじゃま
+    this.carry = 0;
+    this.chainNo = 0;
+    this.score = 0;
+    this.alive = true;
+    this.wait = 3000;              // カウントダウンぶん待つ
+    this.phase = "spawn";
+    this.pair = null;
+    this.plan = null;
+    this.stepT = 0;
+  }
+  newPair() {
+    const n = Math.max(1, Math.min(COLOR_COUNT, COLOR_NAMES.length));
+    return [Math.floor(this.rng() * n), Math.floor(this.rng() * n)];
+  }
+  receive(msg) {   // プレイヤーからのメッセージ
+    if (!msg) return;
+    if (msg.t === "garbage" && typeof msg.n === "number" && msg.n > 0) this.pending += Math.floor(msg.n);
+    if (msg.t === "lose") this.alive = false;   // プレイヤーが倒れた → COMの勝ち (停止)
+  }
+  send(msg) { handleNet(msg); }
+  sendBoard() {
+    this.send({ t: "board", g: encodeGridOf(this.grid), s: this.score, c: this.chainNo, p: this.pending });
+  }
+  sendPair() {
+    const p = this.pair;
+    if (p) this.send({ t: "pair", x: p.x, y: Math.round(p.y * 10) / 10, r: p.rot, cs: p.colors });
+  }
+
+  // 全候補 (列×回転) を落としてみて一番良い手を選ぶ
+  choosePlan(colors) {
+    let best = { ev: -Infinity, x: 2, rot: 0 };
+    for (let rot = 0; rot < 4; rot++) {
+      const [vx, vy] = ROTV[rot];
+      for (let x = 0; x < COLS; x++) {
+        if (x + vx < 0 || x + vx >= COLS) continue;
+        if (!canPlace(x, 1, rot, this.grid)) continue;
+        const rest = restRow(x, 1, rot, this.grid);
+        if (rest < 1) continue;
+        const g = this.grid.map(row => row.slice());
+        if (rest < ROWS) g[rest][x] = colors[0];
+        const cy = rest + vy;
+        if (cy >= 0 && cy < ROWS) g[cy][x + vx] = colors[1];
+        const sim = simulate(g);
+        // AIのゆらぎには Math.random を使う (共有シードを消費しないため)
+        const ev = this.evaluate(sim) + Math.random() * 12;
+        if (ev > best.ev) best = { ev, x, rot };
+      }
+    }
+    return best;
+  }
+  evaluate(sim) {
+    const g = sim.grid;
+    const heights = [];
+    for (let c = 0; c < COLS; c++) {
+      let h = 0;
+      for (let r = 1; r < ROWS; r++) if (g[r][c] !== -1) { h = ROWS - r; break; }
+      heights.push(h);
+    }
+    const maxH = Math.max(...heights);
+    let ev = 0;
+    ev += sim.score * (maxH >= 9 ? 3 : 0.35);   // ふだんは連鎖を貯め、ピンチなら即発火
+    // 同色隣接ボーナス (連鎖のタネづくり)
+    let adj = 0;
+    for (let r = 1; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+      const v = g[r][c];
+      if (v < 0) continue;
+      if (c + 1 < COLS && g[r][c + 1] === v) adj++;
+      if (r + 1 < ROWS && g[r + 1][c] === v) adj++;
+    }
+    ev += adj * 18;
+    ev -= Math.max(0, maxH - 7) * 60;   // 積みすぎ注意
+    ev -= heights[2] * 8;               // 死亡列は低く保つ
+    for (let c = 0; c < COLS - 1; c++) ev -= Math.abs(heights[c] - heights[c + 1]) * 2;
+    return ev;
+  }
+
+  dropGarbage() {
+    let n = Math.min(this.pending, MAX_GARBAGE_DROP);
+    this.pending -= n;
+    while (n > 0) {
+      const cols = [0, 1, 2, 3, 4, 5].sort(() => Math.random() - 0.5).slice(0, Math.min(6, n));
+      for (const c of cols) {
+        n--;
+        let r = -1;
+        for (let rr = ROWS - 1; rr >= 0; rr--) if (this.grid[rr][c] === -1) { r = rr; break; }
+        if (r >= 0) this.grid[r][c] = GARBAGE;
+      }
+    }
+  }
+
+  tick(dt) {
+    if (!this.alive) return;
+    if (this.wait > 0) { this.wait -= dt; return; }
+
+    if (this.phase === "spawn") {
+      const colors = this.queue.shift();
+      this.queue.push(this.newPair());
+      if (!canPlace(2, 1, 0, this.grid)) {   // 窒息 → プレイヤーの勝ち
+        this.alive = false;
+        this.sendBoard();
+        this.send({ t: "lose" });
+        return;
+      }
+      this.pair = { x: 2, y: 1, rot: 0, colors };
+      this.plan = this.choosePlan(colors);
+      this.phase = "fall";
+      this.stepT = 0;
+      this.sendPair();
+    }
+    else if (this.phase === "fall") {
+      const p = this.pair;
+      // 目標へ 150ms ごとに1ステップずつ回転・横移動 (人間っぽい動き)
+      this.stepT += dt;
+      if (this.stepT >= 150) {
+        this.stepT = 0;
+        if (p.rot !== this.plan.rot) {
+          const nr = (p.rot + 1) % 4;
+          if (canPlace(p.x, Math.ceil(p.y), nr, this.grid) && canPlace(p.x, Math.floor(p.y), nr, this.grid)) p.rot = nr;
+        } else if (p.x !== this.plan.x) {
+          const dx = Math.sign(this.plan.x - p.x);
+          if (canPlace(p.x + dx, Math.floor(p.y), p.rot, this.grid) && canPlace(p.x + dx, Math.ceil(p.y), p.rot, this.grid)) p.x += dx;
+        }
+        this.sendPair();
+      }
+      const ready = (p.x === this.plan.x && p.rot === this.plan.rot);
+      const rest = restRow(p.x, p.y, p.rot, this.grid);
+      p.y = Math.min(p.y + (ready ? 10 : 2.2) * dt / 1000, rest);
+      if (p.y >= rest - 1e-9 && (ready || !canPlace(p.x, rest + 1, p.rot, this.grid))) {
+        const yi = Math.round(p.y);
+        const [vx, vy] = ROTV[p.rot];
+        if (yi >= 0) this.grid[yi][p.x] = p.colors[0];
+        if (yi + vy >= 0) this.grid[yi + vy][p.x + vx] = p.colors[1];
+        this.pair = null;
+        this.chainNo = 0;
+        this.phase = "resolve";
+        this.wait = 250;
+        this.sendBoard();
+      }
+    }
+    else if (this.phase === "resolve") {
+      compactGrid(this.grid);
+      const groups = findGroupsIn(this.grid);
+      if (groups.length) {
+        this.chainNo++;
+        const st = chainStepScore(groups, this.chainNo);
+        this.score += st.score;
+        // おじゃま換算 & 相殺 & 送信 (プレイヤーと同じルール)
+        this.carry += st.score / GARBAGE_RATE;
+        let out = Math.floor(this.carry);
+        this.carry -= out;
+        if (out > 0 && this.pending > 0) {
+          const cancel = Math.min(this.pending, out);
+          this.pending -= cancel; out -= cancel;
+        }
+        if (out > 0) this.send({ t: "garbage", n: out });
+        const gn = garbageNeighbors(this.grid, groups);
+        for (const gr of groups) for (const [r, c] of gr.cells) this.grid[r][c] = -1;
+        for (const [r, c] of gn) this.grid[r][c] = -1;
+        this.sendBoard();
+        this.wait = 700;   // 連鎖のテンポ (プレイヤーの消滅演出とだいたい同じ)
+      } else {
+        let empty = true;
+        for (let r = 1; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (this.grid[r][c] !== -1) empty = false;
+        if (empty && this.chainNo > 0) this.send({ t: "garbage", n: 30 });   // 全消し攻撃
+        let extra = 0;
+        if (this.pending > 0) { this.dropGarbage(); this.sendBoard(); extra = 400; }
+        this.phase = "spawn";
+        this.wait = extra + 350 + Math.random() * 500;   // 思考時間
+      }
+    }
+  }
+}
+
+function startComMatch(seed) {
+  cleanupPeer();
+  com = new ComPlayer(seed);
+  isHost = true;
+  startVsMatch(seed);
+}
+
+function setupConn(c) {
+  conn = c;
+  conn.on("data", handleNet);
+  const onGone = () => {
+    if (mode === "vs" && state !== "vsend") { vsResult = "disconnect"; state = "vsend"; }
+  };
+  conn.on("close", onGone);
+  conn.on("error", onGone);
+}
+
+function makeCode() {
+  const chars = "abcdefghjkmnpqrstuvwxyz23456789"; // まぎらわしい文字は除外
+  let s = "";
+  for (let i = 0; i < 4; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return "puyo-" + s;
+}
+
+function hostRoom() {
+  if (typeof Peer === "undefined") { setNetStatus("オンライン機能にはインターネット接続が必要です"); return; }
+  cleanupPeer();
+  isHost = true;
+  const code = makeCode();
+  peer = new Peer(code);
+  $("roomCode").textContent = code;
+  showPanel("host");
+  peer.on("error", (e) => {
+    setNetStatus("エラー: " + e.type + " (もういちど試してください)");
+    showPanel("menu");
+    cleanupPeer();
+  });
+  peer.on("connection", (c) => {
+    setupConn(c);
+    c.on("open", () => {
+      const seed = (Math.random() * 0xffffffff) >>> 0;
+      netSend({ t: "start", seed });
+      startVsMatch(seed);
+    });
+  });
+}
+
+function joinRoom() {
+  if (typeof Peer === "undefined") { $("joinStatus").textContent = "オンライン機能にはインターネット接続が必要です"; return; }
+  let code = $("joinCode").value.trim().toLowerCase();
+  if (!code) return;
+  if (!code.startsWith("puyo-")) code = "puyo-" + code;
+  cleanupPeer();
+  isHost = false;
+  $("joinStatus").textContent = "つないでいます...";
+  peer = new Peer();
+  peer.on("error", (e) => {
+    $("joinStatus").textContent = "つながりませんでした (" + e.type + ")";
+  });
+  peer.on("open", () => {
+    const c = peer.connect(code);
+    setupConn(c);
+    // 対戦開始はホストからの "start" メッセージ受信時
+  });
+}
+
+// ----- 接続UIの表示切り替え -----
+function netuiOpen() { return $("netui").style.display !== "none"; }
+function showNetUI() { $("netui").style.display = "flex"; showPanel("menu"); setNetStatus(""); }
+function hideNetUI() { $("netui").style.display = "none"; }
+function showPanel(name) {
+  for (const p of ["menu", "host", "join"]) $("net-" + p).style.display = (p === name) ? "block" : "none";
+}
+function setNetStatus(t) { $("netStatus").textContent = t || ""; }
+
+$("btnHost").onclick = hostRoom;
+$("btnJoin").onclick = () => { showPanel("join"); $("joinStatus").textContent = ""; $("joinCode").focus(); };
+$("btnBack").onclick = () => { hideNetUI(); };
+$("btnConnect").onclick = joinRoom;
+$("btnCancelHost").onclick = () => { cleanupPeer(); showPanel("menu"); };
+$("btnCancelJoin").onclick = () => { cleanupPeer(); showPanel("menu"); };
+$("joinCode").addEventListener("keydown", (e) => { if (e.key === "Enter") joinRoom(); e.stopPropagation(); });
+
+// 対戦中はキャンバスを広げて相手の盤面を出す
+function setCanvasWidth(w) {
+  W = w;
+  cv.width = W * SCALE;
+  ctx.imageSmoothingEnabled = false; // サイズ変更でリセットされるため再設定
+}
+
+// 相手の盤面 (半分サイズのミラー表示)
+function drawOpponent() {
+  const ox = 176, oy = 20, cs = 8;
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#9aa2d8";
+  ctx.font = "bold 7px 'Segoe UI', sans-serif";
+  ctx.fillText(com ? "COM" : "あいて", ox, 14);
+  ctx.fillStyle = "#171830";
+  ctx.fillRect(ox - 2, oy - 2, COLS * cs + 4, (ROWS - 1) * cs + 4);
+  ctx.fillStyle = "#101124";
+  ctx.fillRect(ox, oy, COLS * cs, (ROWS - 1) * cs);
+  if (!opp || !imgReady) return;
+  if (opp.grid) {
+    for (let r = 1; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+      const v = opp.grid[r][c];
+      if (v === -1) continue;
+      const fr = frameOf(v, 0);
+      if (fr) ctx.drawImage(img, fr[0], fr[1], CELL, CELL, ox + c * cs, oy + (r - 1) * cs, cs, cs);
+    }
+  }
+  if (opp.pair) {
+    const p = opp.pair, v = ROTV[p.rot] || [0, -1];
+    const f0 = frameOf(p.colors[0], 0), f1 = frameOf(p.colors[1], 0);
+    if (f0 && p.y >= 1) ctx.drawImage(img, f0[0], f0[1], CELL, CELL, ox + p.x * cs, oy + (p.y - 1) * cs, cs, cs);
+    if (f1 && p.y + v[1] >= 1) ctx.drawImage(img, f1[0], f1[1], CELL, CELL, ox + (p.x + v[0]) * cs, oy + (p.y + v[1] - 1) * cs, cs, cs);
+  }
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 7px 'Segoe UI', sans-serif";
+  ctx.fillText(String(opp.score || 0), ox, oy + (ROWS - 1) * cs + 12);
+  if (opp.pending > 0) {
+    ctx.fillStyle = "#ff9b9b";
+    ctx.fillText("おじゃま ×" + opp.pending, ox, oy + (ROWS - 1) * cs + 22);
+  }
+}
+
+// ================= サウンド =================
+let audio = null, muted = false;
+function ac() {
+  if (!audio) audio = new (window.AudioContext || window.webkitAudioContext)();
+  if (audio.state === "suspended") audio.resume();
+  return audio;
+}
+function beep(freq, dur, type = "square", vol = 0.05, delay = 0, slide = 0) {
+  if (muted) return;
+  try {
+    const a = ac(), t0 = a.currentTime + delay;
+    const o = a.createOscillator(), g = a.createGain();
+    o.type = type; o.frequency.setValueAtTime(freq, t0);
+    if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, freq + slide), t0 + dur);
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+    o.connect(g); g.connect(a.destination);
+    o.start(t0); o.stop(t0 + dur + 0.02);
+  } catch (e) { /* audio not available */ }
+}
+const sndMove     = () => beep(240, 0.04, "square", 0.03);
+const sndRotate   = () => beep(420, 0.06, "square", 0.04);
+const sndLand     = () => beep(130, 0.08, "triangle", 0.07, 0, -40);
+const sndLevelUp  = () => { beep(520, 0.08, "square", 0.05); beep(780, 0.1, "square", 0.05, 0.09); };
+const sndAllClear = () => [523, 659, 784, 1047].forEach((f, i) => beep(f, 0.12, "triangle", 0.06, i * 0.09));
+const sndGameOver = () => [392, 330, 262, 196].forEach((f, i) => beep(f, 0.22, "sawtooth", 0.05, i * 0.18));
+function sndPop(ch) {
+  const base = 330 * Math.pow(1.15, ch - 1);
+  beep(base, 0.09, "square", 0.06);
+  beep(base * 1.5, 0.12, "square", 0.06, 0.07);
+}
+const sndWarn = () => { beep(185, 0.12, "sawtooth", 0.05); beep(150, 0.14, "sawtooth", 0.05, 0.13); };
+
+// ================= 入力 =================
+const held = {};
+let dasTimer = 0, dasDir = 0;
+
+window.addEventListener("keydown", (e) => {
+  if (e.target && e.target.tagName === "INPUT") return; // 合言葉の入力中はゲームに渡さない
+  if (netuiOpen()) { if (e.code === "Escape") hideNetUI(); return; }
+  if (["ArrowLeft","ArrowRight","ArrowDown","ArrowUp","Space"].includes(e.code)) e.preventDefault();
+  if (e.repeat) return;
+  ac(); // ユーザー操作でオーディオ解禁
+
+  if (e.code === "KeyM") { muted = !muted; return; }
+
+  if (mode === "vs") {
+    if (e.code === "KeyQ") {
+      if (state !== "vsend") netSend({ t: "lose" }); // 途中で抜けたら負け扱い
+      exitVs();
+      return;
+    }
+    if (e.code === "KeyR") {
+      if (state === "vsend") {
+        if (com) { startComMatch((Math.random() * 0xffffffff) >>> 0); return; }
+        if (vsResult !== "disconnect" && !myRematch) {
+          myRematch = true;
+          netSend({ t: "rematch" });
+          maybeRematch();
+        }
+      }
+      return;
+    }
+    // 対戦中はポーズなし
+  } else {
+    if (e.code === "KeyR") { reset(); return; }
+    if (e.code === "KeyQ" && state !== "title") { mode = "solo"; initBoard(); state = "title"; return; }
+    if (state === "title") {
+      if (e.code === "KeyV") { showNetUI(); return; }
+      if (e.code === "KeyC") { startComMatch((Math.random() * 0xffffffff) >>> 0); return; }
+      if (e.code === "KeyS") { mode = "survival"; reset(); return; }
+      if (e.code === "Enter" || e.code === "Space") { mode = "solo"; reset(); return; }
+    }
+    if (state === "over" && e.code === "Enter") { reset(); return; }
+    if (e.code === "KeyP") {
+      if (state === "pause") { state = prevState; }
+      else if (state === "play" || state === "drop" || state === "pop") { prevState = state; state = "pause"; }
+      return;
+    }
+  }
+  if (state !== "play") { held[e.code] = true; return; }
+
+  switch (e.code) {
+    case "ArrowLeft":  if (tryMove(-1)) netSendPair(); dasDir = -1; dasTimer = 0; break;
+    case "ArrowRight": if (tryMove(1)) netSendPair();  dasDir = 1;  dasTimer = 0; break;
+    case "KeyZ":       tryRotate(-1); netSendPair(); break;
+    case "KeyX": case "ArrowUp": tryRotate(1); netSendPair(); break;
+    case "Space":      hardDrop(); break;
+  }
+  held[e.code] = true;
+});
+window.addEventListener("keyup", (e) => {
+  held[e.code] = false;
+  if ((e.code === "ArrowLeft" && dasDir === -1) || (e.code === "ArrowRight" && dasDir === 1)) dasDir = 0;
+});
+
+// ================= 更新 =================
+function update(dt) {
+  time += dt;
+  if (chainPopup) { chainPopup.t += dt; if (chainPopup.t > 1000) chainPopup = null; }
+  lastLocked = lastLocked.filter(l => time - l.t < 140);
+
+  // COM対戦: COM側のゲームを進める
+  if (com) com.tick(dt);
+
+  // サバイバル: 時間経過でおじゃまが降ってくる (レベルが上がると激しく)
+  if (mode === "survival" && (state === "play" || state === "drop" || state === "pop")) {
+    survivalT -= dt;
+    if (survivalT <= 0) {
+      pendingIncoming += Math.min(1 + level, 10);
+      survivalT = Math.max(6000, 14000 - (level - 1) * 1500);
+      sndWarn();
+    }
+  }
+
+  if (state === "count") {
+    countdownT -= dt;
+    if (countdownT <= 0) { spawn(); state = "play"; sndLevelUp(); }
+    return;
+  }
+
+  if (state === "play" && pair) {
+    // 対戦: 操作中のぷよの位置を定期的に相手へ送る
+    if (mode === "vs") {
+      pairSendTimer += dt;
+      if (pairSendTimer >= 120) { pairSendTimer = 0; netSendPair(); }
+    }
+    // 横移動の連続入力 (DAS)
+    if (dasDir !== 0 && (held.ArrowLeft || held.ArrowRight)) {
+      dasTimer += dt;
+      if (dasTimer > 160) { if (tryMove(dasDir)) dasTimer = 120; else dasTimer = 160; }
+    }
+
+    const soft = held.ArrowDown;
+    const speed = soft ? 22 : 1.0 + (level - 1) * 0.35; // cells/sec
+    const rest = restRow(pair.x, pair.y, pair.rot);
+    const ny = Math.min(pair.y + speed * dt / 1000, rest);
+    if (soft) {
+      softDropAccum += ny - pair.y;
+      while (softDropAccum >= 1) { score += 1; softDropAccum -= 1; }
+    }
+    pair.y = ny;
+
+    if (pair.y >= rest - 1e-9 && !canPlace(pair.x, rest + 1, pair.rot)) {
+      if (!grounded) { grounded = true; lockTimer = 0; }
+      lockTimer += dt;
+      if (lockTimer > (soft ? 80 : 450)) {
+        lockPair();
+      }
+    } else {
+      grounded = false;
+    }
+  }
+  else if (state === "drop") {
+    let done = true;
+    for (const a of dropAnims) {
+      a.v = Math.min(a.v + 90 * dt / 1000, 32);
+      a.y = Math.min(a.y + a.v * dt / 1000, a.toY);
+      if (a.y < a.toY) done = false;
+    }
+    if (done) {
+      for (const a of dropAnims) {
+        grid[a.toY][a.col] = a.color;
+        lastLocked.push({ x: a.col, y: a.toY, t: time });
+      }
+      if (dropAnims.length) sndLand();
+      dropAnims = [];
+      checkChains();
+    }
+  }
+  else if (state === "pop") {
+    popTimer += dt;
+    if (popTimer > 620) {
+      for (const p of popCells) grid[p.r][p.c] = -1;
+      popCells = [];
+      netSendBoard();
+      startDrop();
+    }
+  }
+}
+
+// ================= 描画 =================
+// 色ID→スプライト。おじゃまは "ojama" レイヤーがあればそれを、なければ白ぷよを使う
+function spriteFrames(id) {
+  if (id === GARBAGE) return SHEET["ojama"] || SHEET["white"] || SHEET[COLOR_NAMES[COLOR_NAMES.length - 1]];
+  return SHEET[COLOR_NAMES[id]];
+}
+// フレーム番号が存在しない場合は近いものにクランプする (素材更新への耐性)
+function frameOf(id, frame) {
+  const frames = spriteFrames(id);
+  if (!frames || !frames.length) return null;
+  return frames[Math.min(frame, frames.length - 1)] || frames[0];
+}
+
+function drawPuyo(colorIdx, frame, px, py, alpha = 1) {
+  if (!imgReady) return;
+  const fr = frameOf(colorIdx, frame);
+  if (!fr) return;
+  if (alpha < 1) ctx.globalAlpha = alpha;
+  ctx.drawImage(img, fr[0], fr[1], CELL, CELL, Math.round(px), Math.round(py), CELL, CELL);
+  if (alpha < 1) ctx.globalAlpha = 1;
+}
+
+// アイドル時にたまにまばたきする
+function idleFrame(c, r) {
+  const win = Math.floor(time / 2600);
+  const h = (c * 31 + r * 17 + win * 7) % 13;
+  if (h === 0 && (time % 2600) < 220) return 1;
+  return 0;
+}
+
+function cellPX(c) { return BOARD_X + c * CELL; }
+function cellPY(r) { return BOARD_Y + (r - 1) * CELL; } // row1 が可視最上段
+
+function draw() {
+  ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  // 盤面背景
+  ctx.fillStyle = "#171830";
+  ctx.fillRect(BOARD_X - 2, BOARD_Y - 2, COLS * CELL + 4, (ROWS - 1) * CELL + 4);
+  ctx.fillStyle = "#101124";
+  ctx.fillRect(BOARD_X, BOARD_Y, COLS * CELL, (ROWS - 1) * CELL);
+  ctx.strokeStyle = "rgba(255,255,255,0.05)";
+  ctx.lineWidth = 0.5;
+  for (let c = 1; c < COLS; c++) {
+    ctx.beginPath(); ctx.moveTo(cellPX(c), BOARD_Y); ctx.lineTo(cellPX(c), BOARD_Y + (ROWS-1)*CELL); ctx.stroke();
+  }
+  // 死亡地点マーカー (3列目)
+  ctx.strokeStyle = "rgba(255,80,80,0.5)";
+  ctx.lineWidth = 1;
+  const mx = cellPX(2) + 8, my = cellPY(1) + 8;
+  ctx.beginPath();
+  ctx.moveTo(mx - 3, my - 3); ctx.lineTo(mx + 3, my + 3);
+  ctx.moveTo(mx + 3, my - 3); ctx.lineTo(mx - 3, my + 3);
+  ctx.stroke();
+
+  // 置かれたぷよ
+  const popSet = new Set(popCells.map(p => p.r + "," + p.c));
+  for (let r = 1; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (grid[r][c] === -1) continue;
+      if (popSet.has(r + "," + c)) continue;
+      let f = idleFrame(c, r);
+      if (lastLocked.some(l => l.x === c && l.y === r)) f = 1; // 着地の瞬間
+      drawPuyo(grid[r][c], f, cellPX(c), cellPY(r));
+    }
+  }
+
+  // 消滅アニメーション (点滅)
+  if (state === "pop") {
+    const visible = Math.floor(popTimer / 70) % 2 === 0;
+    for (const p of popCells) {
+      if (popTimer > 480 || visible) {
+        const shrink = popTimer > 480 ? Math.min(1, (popTimer - 480) / 140) : 0;
+        const s = CELL * (1 - shrink);
+        const fr = frameOf(p.color, 2);
+        if (s > 1 && fr && imgReady) {
+          ctx.drawImage(img, fr[0], fr[1], CELL, CELL,
+            cellPX(p.c) + (CELL - s) / 2, cellPY(p.r) + (CELL - s) / 2, s, s);
+        }
+      }
+    }
+  }
+
+  // 落下アニメーション中のぷよ
+  for (const a of dropAnims) {
+    drawPuyo(a.color, 0, cellPX(a.col), cellPY(a.y));
+  }
+
+  // 操作中のぷよ + ゴースト
+  if (state === "play" && pair) {
+    const [vx, vy] = ROTV[pair.rot];
+    const rest = restRow(pair.x, pair.y, pair.rot);
+    // ゴースト
+    if (rest > pair.y + 0.5) {
+      if (rest >= 1) drawPuyo(pair.colors[0], 0, cellPX(pair.x), cellPY(rest), 0.28);
+      if (rest + vy >= 1) drawPuyo(pair.colors[1], 0, cellPX(pair.x + vx), cellPY(rest + vy), 0.28);
+    }
+    // 本体 (隠し行より上は描かない)
+    const squish = grounded ? 1 : 0;
+    if (pair.y >= 1) drawPuyo(pair.colors[0], squish, cellPX(pair.x), cellPY(pair.y));
+    else if (pair.y > 0) drawPuyo(pair.colors[0], squish, cellPX(pair.x), cellPY(pair.y));
+    if (pair.y + vy >= 0.2) drawPuyo(pair.colors[1], 0, cellPX(pair.x + vx), cellPY(pair.y + vy));
+  }
+
+  // 隠し行を覆う (盤面上のはみ出しをマスク)
+  ctx.fillStyle = "#101120";
+  ctx.fillRect(0, 0, W, BOARD_Y);
+
+  // おじゃま予告 (自分に降ってくる予定の数)
+  if ((mode === "vs" || mode === "survival") && pendingIncoming > 0) {
+    const gfr = frameOf(GARBAGE, 0);
+    if (gfr && imgReady) ctx.drawImage(img, gfr[0], gfr[1], CELL, CELL, BOARD_X, 0, 8, 8);
+    ctx.fillStyle = "#ff9b9b";
+    ctx.font = "bold 7px 'Segoe UI', sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillText("×" + pendingIncoming, BOARD_X + 10, 7);
+  }
+  // 相手の盤面
+  if (mode === "vs") drawOpponent();
+
+  // ===== サイドバー =====
+  const sx0 = 116;
+  ctx.fillStyle = "#dfe3ff";
+  ctx.font = "bold 7px 'Segoe UI', sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText("NEXT", sx0, 16);
+  ctx.fillStyle = "#171830";
+  ctx.fillRect(sx0, 20, 24, 40);
+  ctx.fillRect(sx0 + 30, 26, 20, 30);
+  if (queue) {
+    drawPuyo(queue[0][1], 0, sx0 + 4, 24);
+    drawPuyo(queue[0][0], 0, sx0 + 4, 40);
+    ctx.globalAlpha = 0.55;
+    if (imgReady) {
+      const q1 = queue[1];
+      const frA = frameOf(q1[1], 0), frB = frameOf(q1[0], 0);
+      if (frA) ctx.drawImage(img, frA[0], frA[1], CELL, CELL, sx0 + 34, 29, 12, 12);
+      if (frB) ctx.drawImage(img, frB[0], frB[1], CELL, CELL, sx0 + 34, 42, 12, 12);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.fillStyle = "#9aa2d8";
+  ctx.fillText("SCORE", sx0, 76);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 9px 'Segoe UI', sans-serif";
+  ctx.fillText(String(score ?? 0), sx0, 88);
+
+  ctx.fillStyle = "#9aa2d8"; ctx.font = "bold 7px 'Segoe UI', sans-serif";
+  ctx.fillText("LEVEL", sx0, 106);
+  ctx.fillStyle = "#ffffff"; ctx.font = "bold 9px 'Segoe UI', sans-serif";
+  ctx.fillText(String(level ?? 1), sx0, 118);
+
+  ctx.fillStyle = "#9aa2d8"; ctx.font = "bold 7px 'Segoe UI', sans-serif";
+  ctx.fillText("MAX CHAIN", sx0, 136);
+  ctx.fillStyle = "#ffd76a"; ctx.font = "bold 9px 'Segoe UI', sans-serif";
+  ctx.fillText((maxChain ?? 0) + " 連鎖", sx0, 148);
+
+  if (mode === "survival") {
+    ctx.fillStyle = "#ff9b9b"; ctx.font = "bold 7px 'Segoe UI', sans-serif";
+    ctx.fillText("サバイバル", sx0, 164);
+    ctx.fillStyle = "#9aa2d8"; ctx.font = "6px 'Segoe UI', sans-serif";
+    ctx.fillText("つぎ: " + Math.max(0, Math.ceil(survivalT / 1000)) + " びょう", sx0, 174);
+  }
+
+  if (muted) {
+    ctx.fillStyle = "#666a99"; ctx.font = "6px 'Segoe UI', sans-serif";
+    ctx.fillText("MUTE", sx0, 196);
+  }
+
+  // 連鎖ポップアップ
+  if (chainPopup) {
+    const p = Math.min(1, chainPopup.t / 150);
+    const alpha = chainPopup.t > 700 ? Math.max(0, 1 - (chainPopup.t - 700) / 300) : 1;
+    ctx.globalAlpha = alpha;
+    ctx.font = "bold " + (10 + p * 4) + "px 'Segoe UI', sans-serif";
+    ctx.textAlign = "center";
+    ctx.strokeStyle = "#000"; ctx.lineWidth = 3;
+    const ty = 60 - p * 6;
+    ctx.strokeText(chainPopup.text, BOARD_X + COLS * CELL / 2, ty);
+    ctx.fillStyle = "#ffd76a";
+    ctx.fillText(chainPopup.text, BOARD_X + COLS * CELL / 2, ty);
+    ctx.globalAlpha = 1;
+    ctx.textAlign = "left";
+  }
+
+  // ===== オーバーレイ =====
+  if (state === "title") {
+    overlay(0.6);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 18px 'Segoe UI', sans-serif";
+    ctx.fillText("ぷよぷよ", W / 2, 70);
+    // 全色のぷよが波打つデモ (未使用の色もここで登場)
+    const nColors = COLOR_NAMES.length;
+    for (let i = 0; i < nColors; i++) {
+      const bob = Math.sin(time / 300 + i * 0.9) * 4;
+      const f = Math.floor(time / 400 + i) % 3 === 0 ? 1 : 0;
+      drawPuyo(i, f, W / 2 - (nColors * 19 - 3) / 2 + i * 19, 84 + bob);
+    }
+    ctx.fillStyle = "#c3c9ff";
+    ctx.font = "bold 8px 'Segoe UI', sans-serif";
+    const blink = Math.floor(time / 500) % 2 === 0;
+    if (blink) ctx.fillText("ENTER : とことん", W / 2, 124);
+    ctx.font = "bold 7px 'Segoe UI', sans-serif";
+    ctx.fillText("S : おじゃまサバイバル", W / 2, 138);
+    ctx.fillText("C : COMとたいせん", W / 2, 150);
+    ctx.fillText("V : オンラインたいせん", W / 2, 162);
+    ctx.font = "6px 'Segoe UI', sans-serif";
+    ctx.fillStyle = "#8a90c8";
+    ctx.fillText("4つつなげて消そう!", W / 2, 176);
+    ctx.textAlign = "left";
+  }
+  else if (state === "pause") {
+    overlay(0.55);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 14px 'Segoe UI', sans-serif";
+    ctx.fillText("ポーズ", W / 2, 100);
+    ctx.font = "8px 'Segoe UI', sans-serif";
+    ctx.fillText("P で再開", W / 2, 118);
+    ctx.textAlign = "left";
+  }
+  else if (state === "over") {
+    overlay(0.65);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ff8080";
+    ctx.font = "bold 16px 'Segoe UI', sans-serif";
+    ctx.fillText("ばたんきゅ〜", W / 2, 90);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 9px 'Segoe UI', sans-serif";
+    ctx.fillText("SCORE: " + score, W / 2, 112);
+    ctx.fillText("最大 " + maxChain + " 連鎖", W / 2, 126);
+    ctx.font = "8px 'Segoe UI', sans-serif";
+    ctx.fillStyle = "#c3c9ff";
+    if (Math.floor(time / 500) % 2 === 0) ctx.fillText("R でリスタート", W / 2, 150);
+    ctx.textAlign = "left";
+  }
+  else if (state === "count") {
+    overlay(0.45);
+    ctx.textAlign = "center";
+    const ccx = BOARD_X + COLS * CELL / 2;
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 26px 'Segoe UI', sans-serif";
+    ctx.fillText(String(Math.max(1, Math.ceil(countdownT / 1000))), ccx, 104);
+    ctx.font = "bold 8px 'Segoe UI', sans-serif";
+    ctx.fillText("まもなくスタート!", ccx, 124);
+    ctx.textAlign = "left";
+  }
+  else if (state === "vsend") {
+    overlay(0.6);
+    ctx.textAlign = "center";
+    const vcx = BOARD_X + COLS * CELL / 2;
+    ctx.font = "bold 16px 'Segoe UI', sans-serif";
+    if (vsResult === "win") { ctx.fillStyle = "#ffd76a"; ctx.fillText("かち!", vcx, 90); }
+    else if (vsResult === "lose") { ctx.fillStyle = "#ff8080"; ctx.fillText("ばたんきゅ〜", vcx, 90); }
+    else { ctx.fillStyle = "#c3c9ff"; ctx.fillText("せつだん...", vcx, 90); }
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 8px 'Segoe UI', sans-serif";
+    ctx.fillText("SCORE: " + score, vcx, 112);
+    ctx.fillStyle = "#c3c9ff";
+    if (vsResult !== "disconnect") {
+      ctx.fillText(myRematch ? "あいてを待っています..." : "R : もういちど", vcx, 134);
+    }
+    ctx.fillText("Q : タイトルへ", vcx, 148);
+    ctx.textAlign = "left";
+  }
+}
+
+function overlay(a) {
+  ctx.fillStyle = "rgba(8, 8, 20, " + a + ")";
+  ctx.fillRect(0, 0, W, H);
+}
+
+// ================= メインループ =================
+let lastT = performance.now();
+function loop(t) {
+  requestAnimationFrame(loop); // 先に予約しておき、1フレームの例外でループ全体が止まらないようにする
+  const dt = Math.min(50, t - lastT);
+  lastT = t;
+  if (state !== "pause" && state !== "title") update(dt);
+  else time += dt;
+  draw();
+}
+requestAnimationFrame(loop);
+
+// デバッグ用フック
+window.PUYO = {
+  get state() { return state; },
+  get grid() { return grid; },
+  get score() { return score; },
+  get pair() { return pair; },
+  get maxChain() { return maxChain; },
+  reset,
+  setCell(r, c, v) { grid[r][c] = v; },
+  forceLock() { hardDrop(); },
+  // 対戦機能のテスト用
+  get mode() { return mode; },
+  get pending() { return pendingIncoming; },
+  get opp() { return opp; },
+  get vsResult() { return vsResult; },
+  get queue() { return queue; },
+  startVs(seed) { startVsMatch(seed >>> 0); },
+  startCom(seed) { startComMatch(seed >>> 0); },
+  startSurvival() { mode = "survival"; reset(); },
+  get com() { return com; },
+  get survivalT() { return survivalT; },
+  set survivalT(v) { survivalT = v; },
+  injectNet(m) { handleNet(m); },
+  exitVs,
+  // rAF が動かない環境 (ヘッドレス検証など) 用: 手動でゲームを ms ぶん進める
+  step(ms) {
+    let remain = ms;
+    while (remain > 0) {
+      const d = Math.min(16, remain);
+      if (state !== "pause" && state !== "title") update(d); else time += d;
+      remain -= d;
+    }
+    draw();
+  },
+  snapshot() { return cv.toDataURL("image/png"); },
+};
+</script>
+</body>
+</html>
